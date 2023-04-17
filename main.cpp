@@ -1,31 +1,7 @@
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
-#include <stdio.h>
-#include <unistd.h>
-#include <errno.h>
-#include <string.h>
-#include <fcntl.h>
-#include <stdlib.h>
-#include <sys/epoll.h>
 #include "locker.h"
 #include "threadpool.h"
 #include "http_conn.h"
-
-#define MAX_FD 65536   // 最大的文件描述符个数
-#define MAX_EVENT_NUMBER 10000  // 监听的最大的事件数量
-
-// 添加文件描述符
-extern void addfd( int epollfd, int fd, bool one_shot );
-extern void removefd( int epollfd, int fd );
-
-void addsig(int sig, void( handler )(int)){
-    struct sigaction sa;
-    memset( &sa, '\0', sizeof( sa ) );
-    sa.sa_handler = handler;
-    sigfillset( &sa.sa_mask );
-    assert( sigaction( sig, &sa, NULL ) != -1 );
-}
+#include "webserver.h"
 
 int main( int argc, char* argv[] ) {
     
@@ -35,101 +11,13 @@ int main( int argc, char* argv[] ) {
     }
 
     int port = atoi( argv[1] );
-    addsig( SIGPIPE, SIG_IGN );
+    WebServer shuka;
 
-    threadpool< http_conn >* pool = NULL;
-    try {
-        //保护段代码
-        pool = new threadpool<http_conn>;
-    } catch( ... ) {
-        return 1;
-    }
-    //创建数组 用来存放conn_fd
-    http_conn* users = new http_conn[ MAX_FD ];
-    //创建监听描述符
-    int listenfd = socket( PF_INET, SOCK_STREAM, 0 );
-
-    int ret = 0;
-    //结构体赋值 
-    struct sockaddr_in address;
-    address.sin_addr.s_addr = INADDR_ANY;
-    address.sin_family = AF_INET;
-    address.sin_port = htons( port );
-
-    // 端口复用
-    int reuse = 1;
-    setsockopt( listenfd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof( reuse ) );
-    //绑定 然后返回一个返回值
-    ret = bind( listenfd, ( struct sockaddr* )&address, sizeof( address ) );
-    //开始监听 
-    ret = listen( listenfd, 5 );
+    //服务器开始监听
+    shuka.Listen(port);
+    //服务器开始运行
+    shuka.EventLoop();
 
 
-    // 创建epoll对象，和事件数组，添加
-    epoll_event events[ MAX_EVENT_NUMBER ];
-
-    //帮向内核注册事件表 返回的是 事件表的文件描述符
-    int epollfd = epoll_create( 5 );
-    //将监听描述符写入epollfd
-    addfd( epollfd, listenfd, false );
-    http_conn::m_epollfd = epollfd;
-    //使用模拟proctor方式
-    while(true) {
-        //阻塞函数 返回有变化的fd的个数 并且把发生变化的放到 event数组里
-        int number = epoll_wait( epollfd, events, MAX_EVENT_NUMBER, -1 );
-        //判断epoll_wait是否出错
-        if ( ( number < 0 ) && ( errno != EINTR ) ) {
-            printf( "epoll failure\n" );
-            break;
-        }
-        //把event数组遍历一遍 event
-        for ( int i = 0; i < number; i++ ) {
-            //取出events中的文件描述符
-            int sockfd = events[i].data.fd;
-            //如果遍历到监听描述符 检测
-            if( sockfd == listenfd ) {
-                
-                struct sockaddr_in client_address;
-                socklen_t client_addrlength = sizeof( client_address );
-                int connfd = accept( listenfd, ( struct sockaddr* )&client_address, &client_addrlength );
-                //connfd<0 说明发生错误
-                if ( connfd < 0 ) {
-                    printf( "errno is: %d\n", errno );
-                    continue;
-                } 
-                //超过最大监听数 不接受这个描述符
-                if( http_conn::m_user_count >= MAX_FD ) {
-                    close(connfd);
-                    continue;
-                }
-                //把这个描述符放到 数组当中 这个数组用来存放接进来数组
-                users[connfd].init( connfd, client_address);
-
-            } else if( events[i].events & ( EPOLLRDHUP | EPOLLHUP | EPOLLERR ) ) {
-
-                users[sockfd].close_conn();
-
-            } else if(events[i].events & EPOLLIN) {
-                //读实践
-                if(users[sockfd].read()) {
-                    pool->append(users + sockfd);
-                } else {
-                    users[sockfd].close_conn();
-                }
-
-            }  else if( events[i].events & EPOLLOUT ) {
-                //写事件
-                if( !users[sockfd].write() ) {
-                    users[sockfd].close_conn();
-                }
-
-            }
-        }
-    }
-    
-    close( epollfd );
-    close( listenfd );
-    delete [] users;
-    delete pool;
     return 0;
 }
